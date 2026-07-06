@@ -437,13 +437,447 @@ function resolveEventRawText(event: MessageEvent | PostbackEvent): string {
   return "";
 }
 
-async function handleMessageEvent(event: MessageEvent, context: LineHandlerContext): Promise<void> {
-  const { cfg, account, runtime, mediaMaxBytes, processMessage } = context;
+type LineEventProcessDecision = NonNullable<Awaited<ReturnType<typeof shouldProcessLineEvent>>>;
+
+type PreparedLineMessageEvent = {
+  event: MessageEvent;
+  decision: LineEventProcessDecision;
+  allMedia: MediaRef[];
+  mediaUnavailable: boolean;
+  rawText: string;
+  messageType: MessageEvent["message"]["type"];
+  isGroup: boolean;
+  groupId?: string;
+  roomId?: string;
+};
+
+type LineBurstWaiter = {
+  resolve: () => void;
+  reject: (err: unknown) => void;
+};
+
+type PendingLineBurst = {
+  key: string;
+  accountId: string;
+  chatType: "direct" | "group" | "room" | "unknown";
+  createdAt: number;
+  candidates: PreparedLineMessageEvent[];
+  waiters: LineBurstWaiter[];
+  flushTimer?: ReturnType<typeof setTimeout>;
+  maxTimer?: ReturnType<typeof setTimeout>;
+};
+
+type PendingLineMediaPreflight = {
+  key: string;
+  accountId: string;
+  chatType: PendingLineBurst["chatType"];
+  startedAt: number;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
+type LineBurstOptions = {
+  enabled: boolean;
+  windowMs: number;
+  textWindowMs: number;
+  maxWaitMs: number;
+  maxEvents: number;
+};
+
+const pendingLineBursts = new Map<string, PendingLineBurst>();
+const pendingLineMediaPreflights = new Map<string, PendingLineMediaPreflight>();
+
+function sanitizeLineBurstMarkerValue(value: unknown): string {
+  const raw = String(value ?? "unknown")
+    .replace(/\s+/g, "_")
+    .replace(/[^\w:./-]/g, "_");
+  return raw.slice(0, 120) || "unknown";
+}
+
+function logLineBurstMarker(marker: string, fields: Record<string, unknown>): void {
+  const body = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}=${sanitizeLineBurstMarkerValue(value)}`)
+    .join(" ");
+  console.log(`${marker}${body ? ` ${body}` : ""}`);
+}
+
+function coerceLineBurstMs(value: unknown, fallback: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.min(Math.floor(value), max));
+}
+
+function coerceLineBurstPositiveInt(value: unknown, fallback: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(Math.floor(value), max));
+}
+
+function resolveLineBurstOptions(context: LineHandlerContext): LineBurstOptions {
+  const rootConfig = (context.cfg.channels?.line as { messageCoalescing?: Record<string, unknown> } | undefined)
+    ?.messageCoalescing;
+  const accountConfig = (context.account.config as { messageCoalescing?: Record<string, unknown> })
+    .messageCoalescing;
+  const config = accountConfig ?? rootConfig ?? {};
+  const killSwitch = process.env.OPENCLAW_LINE_COALESCING?.trim();
+  const enabled =
+    killSwitch === "0" || killSwitch?.toLowerCase() === "false"
+      ? false
+      : config.enabled !== false;
+  return {
+    enabled,
+    windowMs: coerceLineBurstMs(config.windowMs, 3000, 15000),
+    textWindowMs: coerceLineBurstMs(config.textWindowMs, 1200, 5000),
+    maxWaitMs: coerceLineBurstMs(config.maxWaitMs, 5000, 30000),
+    maxEvents: coerceLineBurstPositiveInt(config.maxEvents, 5, 20),
+  };
+}
+
+function lineBurstChatType(params: {
+  isGroup: boolean;
+  groupId?: string;
+  roomId?: string;
+}): "direct" | "group" | "room" | "unknown" {
+  if (params.groupId) {
+    return "group";
+  }
+  if (params.roomId) {
+    return "room";
+  }
+  if (!params.isGroup) {
+    return "direct";
+  }
+  return "unknown";
+}
+
+function resolveLineBurstKey(
+  prepared: PreparedLineMessageEvent,
+  accountId: string,
+): { key: string; chatType: PendingLineBurst["chatType"] } {
+  return resolveLineBurstKeyFromSource(prepared.event.source, accountId);
+}
+
+function resolveLineBurstKeyFromSource(
+  source: MessageEvent["source"],
+  accountId: string,
+): { key: string; chatType: PendingLineBurst["chatType"] } {
+  const { userId, groupId, roomId, isGroup } = getLineSourceInfo(source);
+  const peer = groupId ? `group:${groupId}` : roomId ? `room:${roomId}` : `user:${userId ?? "unknown"}`;
+  const sender = userId ?? "unknown";
+  return {
+    key: `${accountId}|${peer}|sender:${sender}`,
+    chatType: lineBurstChatType({ isGroup, groupId, roomId }),
+  };
+}
+
+function clearLineMediaPreflight(key: string, reason?: string): void {
+  const pending = pendingLineMediaPreflights.get(key);
+  if (!pending) {
+    return;
+  }
+  pendingLineMediaPreflights.delete(key);
+  if (pending.timer) {
+    clearTimeout(pending.timer);
+  }
+  if (reason) {
+    logLineBurstMarker("line_burst_bypass", {
+      accountId: pending.accountId,
+      chatType: pending.chatType,
+      eventCount: 0,
+      mediaCount: 1,
+      textCount: 0,
+      waitMs: Date.now() - pending.startedAt,
+      flushReason: reason,
+    });
+  }
+}
+
+function markLineMediaPreflight(
+  event: MessageEvent,
+  accountId: string,
+  options: LineBurstOptions,
+): string | null {
+  if (!options.enabled || !isDownloadableLineMessageType(event.message.type)) {
+    return null;
+  }
+  const { key, chatType } = resolveLineBurstKeyFromSource(event.source, accountId);
+  clearLineMediaPreflight(key);
+  const pending: PendingLineMediaPreflight = {
+    key,
+    accountId,
+    chatType,
+    startedAt: Date.now(),
+  };
+  pending.timer = setTimeout(() => {
+    clearLineMediaPreflight(key, "media_preflight_expired");
+  }, Math.max(options.windowMs, options.maxWaitMs));
+  pending.timer.unref?.();
+  pendingLineMediaPreflights.set(key, pending);
+  logLineBurstMarker("line_burst_preflight", {
+    accountId,
+    chatType,
+    eventCount: 1,
+    mediaCount: 1,
+    textCount: 0,
+    waitMs: 0,
+    flushReason: "media_download_pending",
+  });
+  return key;
+}
+
+function linePreparedHasMedia(prepared: PreparedLineMessageEvent): boolean {
+  return prepared.allMedia.length > 0 || isDownloadableLineMessageType(prepared.messageType);
+}
+
+function isLineCoalesciblePreparedMessage(prepared: PreparedLineMessageEvent): boolean {
+  return prepared.messageType === "text" || isDownloadableLineMessageType(prepared.messageType);
+}
+
+function isLineImmediateControlMessage(prepared: PreparedLineMessageEvent, cfg: OpenClawConfig): boolean {
+  const text = prepared.rawText.trim();
+  return Boolean(text && text.startsWith("/")) || shouldComputeCommandAuthorized(text, cfg);
+}
+
+function countLineBurstMedia(candidates: readonly PreparedLineMessageEvent[]): number {
+  return candidates.reduce(
+    (count, candidate) =>
+      count + Math.max(candidate.allMedia.length, isDownloadableLineMessageType(candidate.messageType) ? 1 : 0),
+    0,
+  );
+}
+
+function countLineBurstText(candidates: readonly PreparedLineMessageEvent[]): number {
+  return candidates.filter((candidate) => candidate.rawText.trim().length > 0).length;
+}
+
+function formatLineBurstText(texts: readonly string[]): string {
+  const cleaned = texts.map((text) => text.trim()).filter(Boolean);
+  if (cleaned.length <= 1) {
+    return cleaned[0] ?? "";
+  }
+  return `ข้อความจากผู้ใช้ในช่วงเดียวกัน:\n${cleaned
+    .map((text, index) => `${index + 1}. ${text}`)
+    .join("\n")}`;
+}
+
+function clearLineBurstTimers(pending: PendingLineBurst): void {
+  if (pending.flushTimer) {
+    clearTimeout(pending.flushTimer);
+  }
+  if (pending.maxTimer) {
+    clearTimeout(pending.maxTimer);
+  }
+}
+
+function settleLineBurstWaiters(pending: PendingLineBurst, err?: unknown): void {
+  const waiters = pending.waiters.splice(0);
+  for (const waiter of waiters) {
+    if (err) {
+      waiter.reject(err);
+    } else {
+      waiter.resolve();
+    }
+  }
+}
+
+function buildCoalescedLineMessage(pending: PendingLineBurst): PreparedLineMessageEvent {
+  const candidates = pending.candidates;
+  const first = candidates[0];
+  const last = candidates[candidates.length - 1];
+  if (!first || !last) {
+    throw new Error("LINE burst cannot be flushed without candidates");
+  }
+  const allMedia = candidates.flatMap((candidate) => candidate.allMedia);
+  const mediaUnavailable = candidates.some((candidate) => candidate.mediaUnavailable);
+  const text = formatLineBurstText(candidates.map((candidate) => candidate.rawText));
+  if (!text) {
+    return {
+      ...last,
+      allMedia,
+      mediaUnavailable,
+    };
+  }
+
+  const syntheticEvent = {
+    ...last.event,
+    message: {
+      type: "text" as const,
+      id: last.event.message.id || first.event.message.id,
+      text,
+    },
+    timestamp: last.event.timestamp,
+  } as MessageEvent;
+
+  return {
+    ...last,
+    event: syntheticEvent,
+    allMedia,
+    mediaUnavailable,
+    rawText: text,
+    messageType: "text",
+  };
+}
+
+async function flushLineBurst(
+  key: string,
+  reason: string,
+  context: LineHandlerContext,
+): Promise<void> {
+  const pending = pendingLineBursts.get(key);
+  if (!pending) {
+    return;
+  }
+  pendingLineBursts.delete(key);
+  clearLineBurstTimers(pending);
+  const waitMs = Date.now() - pending.createdAt;
+  logLineBurstMarker("line_burst_flush", {
+    accountId: pending.accountId,
+    chatType: pending.chatType,
+    eventCount: pending.candidates.length,
+    mediaCount: countLineBurstMedia(pending.candidates),
+    textCount: countLineBurstText(pending.candidates),
+    waitMs,
+    flushReason: reason,
+  });
+  try {
+    await dispatchPreparedLineMessage(buildCoalescedLineMessage(pending), context);
+    settleLineBurstWaiters(pending);
+  } catch (err) {
+    settleLineBurstWaiters(pending, err);
+    throw err;
+  }
+}
+
+async function cancelLineBurst(
+  key: string,
+  reason: string,
+): Promise<void> {
+  const pending = pendingLineBursts.get(key);
+  if (!pending) {
+    return;
+  }
+  pendingLineBursts.delete(key);
+  clearLineBurstTimers(pending);
+  logLineBurstMarker("line_burst_bypass", {
+    accountId: pending.accountId,
+    chatType: pending.chatType,
+    eventCount: pending.candidates.length,
+    mediaCount: countLineBurstMedia(pending.candidates),
+    textCount: countLineBurstText(pending.candidates),
+    waitMs: Date.now() - pending.createdAt,
+    flushReason: reason,
+  });
+  settleLineBurstWaiters(pending);
+}
+
+function scheduleLineBurstFlush(
+  pending: PendingLineBurst,
+  options: LineBurstOptions,
+  context: LineHandlerContext,
+  windowMs = options.windowMs,
+): void {
+  if (pending.flushTimer) {
+    clearTimeout(pending.flushTimer);
+  }
+  pending.flushTimer = setTimeout(() => {
+    flushLineBurst(pending.key, "window_elapsed", context).catch((err) => {
+      context.runtime.error?.(danger(`line: burst flush failed: ${String(err)}`));
+    });
+  }, windowMs);
+  pending.flushTimer.unref?.();
+
+  if (!pending.maxTimer) {
+    pending.maxTimer = setTimeout(() => {
+      flushLineBurst(pending.key, "max_wait_elapsed", context).catch((err) => {
+        context.runtime.error?.(danger(`line: burst max-wait flush failed: ${String(err)}`));
+      });
+    }, options.maxWaitMs);
+    pending.maxTimer.unref?.();
+  }
+}
+
+async function dispatchLineMessageWithCoalescing(
+  prepared: PreparedLineMessageEvent,
+  context: LineHandlerContext,
+  options = resolveLineBurstOptions(context),
+): Promise<void> {
+  const { key, chatType } = resolveLineBurstKey(prepared, context.account.accountId);
+  const existing = pendingLineBursts.get(key);
+  const mediaPreflightActive = pendingLineMediaPreflights.has(key);
+
+  if (!options.enabled || !isLineCoalesciblePreparedMessage(prepared)) {
+    if (existing) {
+      await flushLineBurst(key, options.enabled ? "non_coalescible" : "disabled", context);
+    }
+    await dispatchPreparedLineMessage(prepared, context);
+    return;
+  }
+
+  if (isLineImmediateControlMessage(prepared, context.cfg)) {
+    if (existing) {
+      await cancelLineBurst(key, "control_command");
+    }
+    await dispatchPreparedLineMessage(prepared, context);
+    return;
+  }
+
+  const hasMedia = linePreparedHasMedia(prepared);
+  const existingHasMedia = existing ? countLineBurstMedia(existing.candidates) > 0 : false;
+  const holdWindowMs =
+    hasMedia || existingHasMedia || mediaPreflightActive ? options.windowMs : options.textWindowMs;
+  if (!existing && !hasMedia && holdWindowMs <= 0) {
+    await dispatchPreparedLineMessage(prepared, context);
+    return;
+  }
+
+  if (existing && existing.candidates.length >= options.maxEvents) {
+    await flushLineBurst(key, "max_events", context);
+    await dispatchLineMessageWithCoalescing(prepared, context);
+    return;
+  }
+
+  const pending =
+    existing ??
+    ({
+      key,
+      accountId: context.account.accountId,
+      chatType,
+      createdAt: Date.now(),
+      candidates: [],
+      waiters: [],
+    } satisfies PendingLineBurst);
+
+  if (!existing) {
+    pendingLineBursts.set(key, pending);
+  }
+  pending.candidates.push(prepared);
+  logLineBurstMarker(existing ? "line_burst_append" : "line_burst_start", {
+    accountId: pending.accountId,
+    chatType: pending.chatType,
+    eventCount: pending.candidates.length,
+    mediaCount: countLineBurstMedia(pending.candidates),
+    textCount: countLineBurstText(pending.candidates),
+    waitMs: Date.now() - pending.createdAt,
+    flushReason: "pending",
+  });
+  scheduleLineBurstFlush(pending, options, context, holdWindowMs);
+  await new Promise<void>((resolve, reject) => {
+    pending.waiters.push({ resolve, reject });
+  });
+}
+
+async function prepareLineMessageEvent(
+  event: MessageEvent,
+  context: LineHandlerContext,
+): Promise<PreparedLineMessageEvent | null> {
+  const { account, runtime, mediaMaxBytes } = context;
   const message = event.message;
 
   const decision = await shouldProcessLineEvent(event, context);
   if (!decision) {
-    return;
+    return null;
   }
 
   const { isGroup, groupId, roomId } = getLineSourceInfo(event.source);
@@ -464,7 +898,7 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
         },
       });
     }
-    return;
+    return null;
   }
 
   const allMedia: MediaRef[] = [];
@@ -492,13 +926,31 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
     }
   }
 
-  const messageContext = await buildLineMessageContext({
+  return {
     event,
+    decision,
     allMedia,
     mediaUnavailable,
+    rawText: resolveEventRawText(event),
+    messageType: message.type,
+    isGroup,
+    groupId,
+    roomId,
+  };
+}
+
+async function dispatchPreparedLineMessage(
+  prepared: PreparedLineMessageEvent,
+  context: LineHandlerContext,
+): Promise<void> {
+  const { cfg, account, processMessage } = context;
+  const messageContext = await buildLineMessageContext({
+    event: prepared.event,
+    allMedia: prepared.allMedia,
+    mediaUnavailable: prepared.mediaUnavailable,
     cfg,
     account,
-    commandAuthorized: decision.commandAccess.authorized,
+    commandAuthorized: prepared.decision.commandAccess.authorized,
     groupHistories: context.groupHistories,
     historyLimit: context.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
   });
@@ -510,13 +962,55 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
 
   await processMessage(messageContext);
 
-  if (isGroup && context.groupHistories) {
-    const historyKey = groupId ?? roomId;
+  if (prepared.isGroup && context.groupHistories) {
+    const historyKey = prepared.groupId ?? prepared.roomId;
     if (historyKey && context.groupHistories.has(historyKey)) {
       createChannelHistoryWindow({ historyMap: context.groupHistories }).clear({
         historyKey,
         limit: context.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
       });
+    }
+  }
+}
+
+async function handleMessageEvent(event: MessageEvent, context: LineHandlerContext): Promise<void> {
+  const options = resolveLineBurstOptions(context);
+  const preflightKey = markLineMediaPreflight(event, context.account.accountId, options);
+  let prepared: PreparedLineMessageEvent | null = null;
+  try {
+    prepared = await prepareLineMessageEvent(event, context);
+    if (!prepared) {
+      return;
+    }
+    await dispatchLineMessageWithCoalescing(prepared, context, options);
+  } catch (err) {
+    const markerKey = prepared
+      ? resolveLineBurstKey(prepared, context.account.accountId)
+      : resolveLineBurstKeyFromSource(event.source, context.account.accountId);
+    logLineBurstMarker("line_burst_error", {
+      accountId: context.account.accountId,
+      chatType: markerKey.chatType,
+      eventCount: 1,
+      mediaCount: prepared
+        ? linePreparedHasMedia(prepared)
+          ? 1
+          : 0
+        : isDownloadableLineMessageType(event.message.type)
+          ? 1
+          : 0,
+      textCount: prepared
+        ? prepared.rawText.trim()
+          ? 1
+          : 0
+        : event.message.type === "text" && event.message.text.trim()
+          ? 1
+          : 0,
+      flushReason: "error",
+    });
+    throw err;
+  } finally {
+    if (preflightKey) {
+      clearLineMediaPreflight(preflightKey);
     }
   }
 }

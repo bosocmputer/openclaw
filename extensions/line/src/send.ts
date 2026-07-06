@@ -210,6 +210,49 @@ function resolveLineReceiptKind(messages: readonly Message[]) {
   return "unknown";
 }
 
+function sanitizeLineMarkerValue(value: unknown): string {
+  const raw = String(value ?? "unknown")
+    .replace(/\s+/g, "_")
+    .replace(/[^\w:./-]/g, "_");
+  return raw.slice(0, 120) || "unknown";
+}
+
+function lineDeliveryChatType(chatId: string): "direct" | "group" | "room" | "unknown" {
+  if (/^U/i.test(chatId)) {
+    return "direct";
+  }
+  if (/^C/i.test(chatId)) {
+    return "group";
+  }
+  if (/^R/i.test(chatId)) {
+    return "room";
+  }
+  return "unknown";
+}
+
+function lineDeliveryFailureReason(err: unknown): string {
+  if (!err || typeof err !== "object") {
+    return truncateUtf16Safe(String(err || "unknown_error"), 80);
+  }
+  const candidate = err as { status?: number; statusCode?: number; message?: string; body?: unknown };
+  const status = candidate.status ?? candidate.statusCode;
+  if (status) {
+    return `http_${status}`;
+  }
+  if (candidate.message) {
+    return truncateUtf16Safe(candidate.message.replace(/\s+/g, " "), 80);
+  }
+  return "unknown_error";
+}
+
+function logLineDeliveryMarker(marker: string, fields: Record<string, unknown>): void {
+  const body = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}=${sanitizeLineMarkerValue(value)}`)
+    .join(" ");
+  console.log(`${marker}${body ? ` ${body}` : ""}`);
+}
+
 async function pushLineMessages(
   to: string,
   messages: Message[],
@@ -221,19 +264,43 @@ async function pushLineMessages(
   }
 
   const { account, client, chatId } = createLinePushContext(to, opts);
-  const pushRequest = client.pushMessage({
-    to: chatId,
-    messages,
-  });
+  const startedAt = Date.now();
+  const markerBase = {
+    accountId: account.accountId,
+    method: "push",
+    chatType: lineDeliveryChatType(chatId),
+    messageCount: messages.length,
+  };
 
-  if (behavior.errorContext) {
-    await pushRequest.catch((err: unknown) => {
-      logLineHttpError(err, behavior.errorContext!);
-      throw err;
+  logLineDeliveryMarker("line_delivery_attempt", markerBase);
+
+  try {
+    const pushRequest = client.pushMessage({
+      to: chatId,
+      messages,
     });
-  } else {
-    await pushRequest;
+
+    if (behavior.errorContext) {
+      await pushRequest.catch((err: unknown) => {
+        logLineHttpError(err, behavior.errorContext!);
+        throw err;
+      });
+    } else {
+      await pushRequest;
+    }
+  } catch (err) {
+    logLineDeliveryMarker("line_delivery_failed", {
+      ...markerBase,
+      durationMs: Date.now() - startedAt,
+      fallbackReason: lineDeliveryFailureReason(err),
+    });
+    throw err;
   }
+
+  logLineDeliveryMarker("line_delivery_ok", {
+    ...markerBase,
+    durationMs: Date.now() - startedAt,
+  });
 
   recordLineOutboundActivity(account.accountId);
 
@@ -263,10 +330,33 @@ async function replyLineMessages(
   behavior: LineReplyBehavior = {},
 ): Promise<void> {
   const { account, client } = createLineMessagingClient(opts);
+  const startedAt = Date.now();
+  const markerBase = {
+    accountId: account.accountId,
+    method: "reply",
+    chatType: "unknown",
+    messageCount: messages.length,
+  };
 
-  await client.replyMessage({
-    replyToken,
-    messages,
+  logLineDeliveryMarker("line_delivery_attempt", markerBase);
+
+  try {
+    await client.replyMessage({
+      replyToken,
+      messages,
+    });
+  } catch (err) {
+    logLineDeliveryMarker("line_delivery_failed", {
+      ...markerBase,
+      durationMs: Date.now() - startedAt,
+      fallbackReason: lineDeliveryFailureReason(err),
+    });
+    throw err;
+  }
+
+  logLineDeliveryMarker("line_delivery_ok", {
+    ...markerBase,
+    durationMs: Date.now() - startedAt,
   });
 
   recordLineOutboundActivity(account.accountId);
@@ -477,14 +567,32 @@ export async function showLoadingAnimation(
   opts: LineClientOpts & { loadingSeconds?: number },
 ): Promise<void> {
   const { client } = createLineMessagingClient(opts);
+  const chatIdNormalized = normalizeTarget(chatId);
+  const loadingSeconds = opts.loadingSeconds ?? 20;
+  const startedAt = Date.now();
+  const markerBase = {
+    accountId: opts.accountId ?? "default",
+    method: "loading",
+    chatType: lineDeliveryChatType(chatIdNormalized),
+    loadingSeconds,
+  };
 
   try {
     await client.showLoadingAnimation({
-      chatId: normalizeTarget(chatId),
-      loadingSeconds: opts.loadingSeconds ?? 20,
+      chatId: chatIdNormalized,
+      loadingSeconds,
+    });
+    logLineDeliveryMarker("line_loading_start", {
+      ...markerBase,
+      durationMs: Date.now() - startedAt,
     });
     logVerbose(`line: showing loading animation to ${chatId}`);
   } catch (err) {
+    logLineDeliveryMarker("line_loading_failed", {
+      ...markerBase,
+      durationMs: Date.now() - startedAt,
+      fallbackReason: lineDeliveryFailureReason(err),
+    });
     logVerbose(`line: loading animation failed (non-fatal): ${String(err)}`);
   }
 }

@@ -16,6 +16,14 @@ interface LineThreadBindingsConfig {
   spawnAcpSessions?: boolean;
 }
 
+interface LineMessageCoalescingConfig {
+  enabled?: boolean;
+  windowMs?: number;
+  textWindowMs?: number;
+  maxWaitMs?: number;
+  maxEvents?: number;
+}
+
 interface LineAccountBaseConfig {
   enabled?: boolean;
   channelAccessToken?: string;
@@ -31,6 +39,7 @@ interface LineAccountBaseConfig {
   mediaMaxMb?: number;
   webhookPath?: string;
   threadBindings?: LineThreadBindingsConfig;
+  messageCoalescing?: LineMessageCoalescingConfig;
   groups?: Record<string, LineGroupConfig>;
 }
 

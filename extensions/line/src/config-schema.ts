@@ -20,6 +20,16 @@ const ThreadBindingsSchema = z
   })
   .strict();
 
+const MessageCoalescingSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    windowMs: z.number().int().nonnegative().optional(),
+    textWindowMs: z.number().int().nonnegative().optional(),
+    maxWaitMs: z.number().int().nonnegative().optional(),
+    maxEvents: z.number().int().positive().optional(),
+  })
+  .strict();
+
 const LineCommonConfigSchemaBase = z.object({
   enabled: z.boolean().optional(),
   channelAccessToken: z.string().optional(),
@@ -35,6 +45,7 @@ const LineCommonConfigSchemaBase = z.object({
   mediaMaxMb: z.number().optional(),
   webhookPath: z.string().optional(),
   threadBindings: ThreadBindingsSchema.optional(),
+  messageCoalescing: MessageCoalescingSchema.optional(),
 });
 
 const LineGroupConfigSchema = z
