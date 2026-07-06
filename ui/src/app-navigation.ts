@@ -46,6 +46,48 @@ export const SETTINGS_NAVIGATION_ROUTES = [
   "logs",
 ] as const satisfies readonly NavigationRouteId[];
 
+export const SIDEBAR_NAV_ROUTES = SIDEBAR_SECTIONS.flatMap((section) => {
+  if (section.label === "chat" || section.label === "settings") {
+    return [];
+  }
+  return [...section.routes];
+}) as readonly NavigationRouteId[];
+
+export type SidebarNavRoute = (typeof SIDEBAR_NAV_ROUTES)[number];
+
+export const DEFAULT_SIDEBAR_PINNED_ROUTES = [
+  "overview",
+  "activity",
+  "sessions",
+  "agents",
+  "skills",
+] as const satisfies readonly SidebarNavRoute[];
+
+export function normalizeSidebarPinnedRoutes(value: unknown): SidebarNavRoute[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const validRoutes = new Set(SIDEBAR_NAV_ROUTES);
+  const normalized: SidebarNavRoute[] = [];
+  for (const routeId of value) {
+    if (typeof routeId !== "string" || !validRoutes.has(routeId as SidebarNavRoute)) {
+      continue;
+    }
+    const sidebarRouteId = routeId as SidebarNavRoute;
+    if (!normalized.includes(sidebarRouteId)) {
+      normalized.push(sidebarRouteId);
+    }
+  }
+
+  return normalized;
+}
+
+export function sidebarMoreRoutes(pinnedRoutes: readonly SidebarNavRoute[]): SidebarNavRoute[] {
+  const pinned = new Set(pinnedRoutes);
+  return SIDEBAR_NAV_ROUTES.filter((routeId) => !pinned.has(routeId));
+}
+
 const NAVIGATION_ICONS: NavigationItem = {
   agents: "folder",
   activity: "activity",
