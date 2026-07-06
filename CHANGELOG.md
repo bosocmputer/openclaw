@@ -20,6 +20,7 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- **Windows remote browser diagnostics:** distinguish WSL2 portproxy self-loops from Chromium's IPv6 fallback using host listener checks, document source-accurate `v4tov6` recovery, require a non-default profile for Chrome 136+ command-line debugging, and warn against broad CDP exposure. (#54669) Thanks @Owlock and @ZengWen-DT.
 - **Apple chat run recovery:** restore active responses from canonical Gateway history after reconnects, foreground resumes, and event gaps, while preserving gateway user-turn identity across Codex and Copilot transcript mirrors to prevent duplicate rows. (#100277)
 - **Claude CLI streamed replies:** preserve assistant text already received from Claude CLI when its terminal result envelope is empty, preventing false empty-response failover after a complete streamed answer. (#90450) Thanks @totobusnello.
 - **Phone identity normalization:** canonicalize stray plus signs, preserve non-phone iMessage handles, and reject digit-free Signal identities across shared channel routing. (#100467) Thanks @morluto.
