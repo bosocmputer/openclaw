@@ -529,7 +529,7 @@ function resolveLineBurstOptions(context: LineHandlerContext): LineBurstOptions 
   return {
     enabled,
     windowMs: coerceLineBurstMs(config.windowMs, 3000, 15000),
-    textWindowMs: coerceLineBurstMs(config.textWindowMs, 1200, 5000),
+    textWindowMs: coerceLineBurstMs(config.textWindowMs, 0, 5000),
     maxWaitMs: coerceLineBurstMs(config.maxWaitMs, 5000, 30000),
     maxEvents: coerceLineBurstPositiveInt(config.maxEvents, 5, 20),
   };
