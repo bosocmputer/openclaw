@@ -38,6 +38,7 @@ export type AgentBrainRuntimeResult = {
   includedMemoryIds?: string[];
   assistantAddendum?: string;
   finalText?: string;
+  toolEvidence?: string[];
 };
 
 export type ApplyAgentBrainRuntimeParams = {
@@ -329,18 +330,26 @@ export function recordAgentBrainFinalPayload(
   payload: ReplyPayloadLike,
   kind?: string,
 ): void {
-  if (
-    !result ||
-    kind !== "final" ||
-    payload.isError ||
-    payload.isReasoning ||
-    payload.isStatusNotice
-  ) {
+  if (!result || payload.isError || payload.isReasoning || payload.isStatusNotice) {
     return;
   }
-  const finalText = normalizeSafeLine(payload.text, 1_500);
-  if (finalText) {
-    result.finalText = finalText;
+  if (kind === "final") {
+    const finalText = normalizeSafeLine(payload.text, 1_500);
+    if (finalText) {
+      result.finalText = finalText;
+    }
+    return;
+  }
+  if (kind === "tool") {
+    const evidence = normalizeSafeLine(payload.text, 500);
+    if (!evidence) {
+      return;
+    }
+    const current = result.toolEvidence ?? [];
+    if (current.includes(evidence) || current.length >= 5) {
+      return;
+    }
+    result.toolEvidence = [...current, evidence];
   }
 }
 
@@ -377,6 +386,7 @@ export async function submitAgentBrainTurnEvidence(
       turnId: params.ctxPayload.MessageSid,
       userText,
       finalText,
+      toolEvidence: Array.isArray(result.toolEvidence) ? result.toolEvidence.slice(0, 5) : [],
       hasMedia: mediaCount > 0,
       mediaCount,
       evidencePhase: "post_turn",

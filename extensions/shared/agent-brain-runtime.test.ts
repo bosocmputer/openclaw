@@ -168,8 +168,10 @@ describe("submitAgentBrainTurnEvidence", () => {
     };
 
     const payload = { text: "รหัส A0101 ราคา 100 บาท", mediaUrls: ["https://example.test/a.jpg"] };
+    recordAgentBrainFinalPayload(result, { text: "tool search selected A0101 ผ้าเบรค" }, "tool");
     recordAgentBrainFinalPayload(result, payload, "final");
     expect(result.finalText).toContain("รหัส A0101");
+    expect(result.toolEvidence).toEqual(["tool search selected A0101 ผ้าเบรค"]);
     expect(payload.mediaUrls).toEqual(["https://example.test/a.jpg"]);
 
     await submitAgentBrainTurnEvidence({
@@ -188,5 +190,8 @@ describe("submitAgentBrainTurnEvidence", () => {
       }),
     );
     expect(fetchMock.mock.calls[0]?.[1]?.body).toContain('"finalText":"รหัส A0101 ราคา 100 บาท"');
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toContain(
+      '"toolEvidence":["tool search selected A0101 ผ้าเบรค"]',
+    );
   });
 });
