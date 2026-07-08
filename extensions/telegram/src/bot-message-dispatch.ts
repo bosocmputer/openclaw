@@ -56,6 +56,8 @@ import {
 } from "openclaw/plugin-sdk/session-transcript-runtime";
 import {
   appendAgentBrainAddendumToPayload,
+  recordAgentBrainFinalPayload,
+  submitAgentBrainTurnEvidence,
   type AgentBrainRuntimeResult,
 } from "../../shared/agent-brain-runtime.js";
 import { resolveTelegramConfigReasoningDefault } from "./agent-config.js";
@@ -2222,6 +2224,7 @@ export const dispatchTelegramMessage = async ({
                     if (deduped === undefined) {
                       return;
                     }
+                    recordAgentBrainFinalPayload(agentBrainResult, deduped, info.kind);
                     const effectivePayload = appendAgentBrainAddendumToPayload(
                       deduped,
                       agentBrainResult,
@@ -2899,6 +2902,14 @@ export const dispatchTelegramMessage = async ({
       if (!turnResult.dispatched) {
         return { kind: "completed" };
       }
+      await submitAgentBrainTurnEvidence({
+        ctxPayload,
+        agentId: route.agentId,
+        channel: "telegram",
+        accountId: route.accountId,
+        result: agentBrainResult,
+        log: logVerbose,
+      });
       ({ queuedFinal } = turnResult.dispatchResult);
       // Out-of-band finals (message_tool_only) never run the in-band final-delivery
       // path, so record the final from the dispatch counts for the cleanup-time

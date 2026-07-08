@@ -24,6 +24,8 @@ import {
 import {
   appendAgentBrainAddendumToPayload,
   applyAgentBrainRuntimeContext,
+  recordAgentBrainFinalPayload,
+  submitAgentBrainTurnEvidence,
   type AgentBrainRuntimeResult,
 } from "../../shared/agent-brain-runtime.js";
 import { resolveDefaultLineAccountId } from "./accounts.js";
@@ -253,8 +255,10 @@ export async function monitorLineProvider(
               record: ctx.turn.record,
               replyPipeline: {},
               delivery: {
-                preparePayload: (payload, info) =>
-                  appendAgentBrainAddendumToPayload(payload, agentBrainResult, info.kind),
+                preparePayload: (payload, info) => {
+                  recordAgentBrainFinalPayload(agentBrainResult, payload, info.kind);
+                  return appendAgentBrainAddendumToPayload(payload, agentBrainResult, info.kind);
+                },
                 durable: (payload, info) =>
                   resolveLineDurableReplyOptions({
                     payload,
@@ -324,6 +328,14 @@ export async function monitorLineProvider(
         if (!hasFinalInboundReplyDispatch(dispatchResult)) {
           logVerbose(`line: no response generated for message from ${ctxPayload.From}`);
         }
+        await submitAgentBrainTurnEvidence({
+          ctxPayload,
+          agentId: route.agentId,
+          channel: "line",
+          accountId: route.accountId,
+          result: agentBrainResult,
+          log: logVerbose,
+        });
       } catch (err) {
         runtime.error?.(danger(`line: auto-reply failed: ${String(err)}`));
 

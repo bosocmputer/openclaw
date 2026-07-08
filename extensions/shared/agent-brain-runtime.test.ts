@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendAgentBrainAddendumToPayload,
   applyAgentBrainRuntimeContext,
+  recordAgentBrainFinalPayload,
+  submitAgentBrainTurnEvidence,
 } from "./agent-brain-runtime.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -146,5 +148,45 @@ describe("appendAgentBrainAddendumToPayload", () => {
     expect(
       appendAgentBrainAddendumToPayload({ text: "error", isError: true }, result, "final"),
     ).toEqual({ text: "error", isError: true });
+  });
+});
+
+describe("submitAgentBrainTurnEvidence", () => {
+  it("posts final answer evidence after a turn without changing the reply payload", async () => {
+    process.env.AGENT_BRAIN_ENABLED = "1";
+    process.env.API_TOKEN = "test-token";
+    process.env.AGENT_BRAIN_API_URL = "http://brain.local";
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, status: "ok" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = {
+      attempted: true,
+      applied: false,
+      status: "ok" as const,
+    };
+
+    const payload = { text: "รหัส A0101 ราคา 100 บาท", mediaUrls: ["https://example.test/a.jpg"] };
+    recordAgentBrainFinalPayload(result, payload, "final");
+    expect(result.finalText).toContain("รหัส A0101");
+    expect(payload.mediaUrls).toEqual(["https://example.test/a.jpg"]);
+
+    await submitAgentBrainTurnEvidence({
+      ctxPayload: createCtx({ MessageSid: "turn-1" }),
+      agentId: "sale",
+      channel: "telegram",
+      accountId: "admin",
+      result,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://brain.local/api/agent-brain/evaluate-turn",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"evidencePhase":"post_turn"'),
+      }),
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toContain('"finalText":"รหัส A0101 ราคา 100 บาท"');
   });
 });

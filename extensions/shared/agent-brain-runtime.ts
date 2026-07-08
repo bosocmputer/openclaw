@@ -37,6 +37,7 @@ export type AgentBrainRuntimeResult = {
   injectedChars?: number;
   includedMemoryIds?: string[];
   assistantAddendum?: string;
+  finalText?: string;
 };
 
 export type ApplyAgentBrainRuntimeParams = {
@@ -45,6 +46,10 @@ export type ApplyAgentBrainRuntimeParams = {
   channel: "line" | "telegram";
   accountId?: string;
   log?: (message: string) => void;
+};
+
+export type SubmitAgentBrainTurnEvidenceParams = ApplyAgentBrainRuntimeParams & {
+  result: AgentBrainRuntimeResult | null | undefined;
 };
 
 const DEFAULT_AGENT_BRAIN_URL = "http://127.0.0.1:4000";
@@ -317,4 +322,72 @@ export function appendAgentBrainAddendumToPayload<TPayload extends ReplyPayloadL
     ...payload,
     text: `${existing}\n\n${addendum}`,
   } as TPayload;
+}
+
+export function recordAgentBrainFinalPayload(
+  result: AgentBrainRuntimeResult | null | undefined,
+  payload: ReplyPayloadLike,
+  kind?: string,
+): void {
+  if (
+    !result ||
+    kind !== "final" ||
+    payload.isError ||
+    payload.isReasoning ||
+    payload.isStatusNotice
+  ) {
+    return;
+  }
+  const finalText = normalizeSafeLine(payload.text, 1_500);
+  if (finalText) {
+    result.finalText = finalText;
+  }
+}
+
+export async function submitAgentBrainTurnEvidence(
+  params: SubmitAgentBrainTurnEvidenceParams,
+): Promise<void> {
+  const startedAt = Date.now();
+  const result = params.result;
+  if (!isAgentBrainEnabled() || !result?.attempted || isControlCommand(params.ctxPayload)) {
+    return;
+  }
+  const token = resolveAgentBrainApiToken();
+  if (!token) {
+    return;
+  }
+  const userText =
+    normalizeEnvString(params.ctxPayload.BodyForAgent) ??
+    normalizeEnvString(params.ctxPayload.RawBody) ??
+    normalizeEnvString(params.ctxPayload.Body) ??
+    "";
+  const finalText = normalizeSafeLine(result.finalText, 1_500) ?? "";
+  const mediaCount = countMedia(params.ctxPayload);
+  if (!userText && !finalText && mediaCount === 0) {
+    return;
+  }
+  const { evaluation, timedOut } = await postAgentBrainEvaluation({
+    endpoint: withEndpoint(resolveAgentBrainApiBaseUrl()),
+    token,
+    timeoutMs: resolveAgentBrainTimeoutMs(),
+    body: {
+      agentId: params.agentId,
+      channel: params.channel,
+      accountId: params.accountId ?? "default",
+      turnId: params.ctxPayload.MessageSid,
+      userText,
+      finalText,
+      hasMedia: mediaCount > 0,
+      mediaCount,
+      evidencePhase: "post_turn",
+    },
+  });
+  const durationMs = Date.now() - startedAt;
+  if (timedOut) {
+    params.log?.(`agent_brain_post status=timeout durationMs=${durationMs}`);
+    return;
+  }
+  params.log?.(
+    `agent_brain_post status=${evaluation?.ok ? "ok" : "error"} reason=${normalizeSafeLine(evaluation?.status, 80) ?? "request_failed"} durationMs=${durationMs}`,
+  );
 }
