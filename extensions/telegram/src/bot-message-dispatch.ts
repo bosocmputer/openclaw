@@ -54,6 +54,10 @@ import {
   appendAssistantMirrorMessageByIdentity,
   readLatestAssistantTextByIdentity,
 } from "openclaw/plugin-sdk/session-transcript-runtime";
+import {
+  appendAgentBrainAddendumToPayload,
+  type AgentBrainRuntimeResult,
+} from "../../shared/agent-brain-runtime.js";
 import { resolveTelegramConfigReasoningDefault } from "./agent-config.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import type { TelegramBotDeps } from "./bot-deps.js";
@@ -241,6 +245,7 @@ type DispatchTelegramMessageParams = {
   telegramCfg: TelegramAccountConfig;
   telegramDeps?: TelegramBotDeps;
   opts: Pick<TelegramBotOptions, "token" | "mediaMaxMb">;
+  agentBrainResult?: AgentBrainRuntimeResult | null;
   retryDispatchErrors?: boolean;
   suppressFailureFallback?: boolean;
 };
@@ -782,6 +787,7 @@ export const dispatchTelegramMessage = async ({
   telegramCfg,
   telegramDeps: injectedTelegramDeps,
   opts,
+  agentBrainResult = null,
   retryDispatchErrors = false,
   suppressFailureFallback = false,
 }: DispatchTelegramMessageParams): Promise<TelegramDispatchResult> => {
@@ -2216,7 +2222,11 @@ export const dispatchTelegramMessage = async ({
                     if (deduped === undefined) {
                       return;
                     }
-                    const effectivePayload = deduped;
+                    const effectivePayload = appendAgentBrainAddendumToPayload(
+                      deduped,
+                      agentBrainResult,
+                      info.kind,
+                    );
 
                     if (
                       shouldSuppressLocalTelegramExecApprovalPrompt({

@@ -1,0 +1,150 @@
+// Tests for Agent Brain runtime helper safety.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  appendAgentBrainAddendumToPayload,
+  applyAgentBrainRuntimeContext,
+} from "./agent-brain-runtime.js";
+
+const ORIGINAL_ENV = { ...process.env };
+
+type TestRuntimeMessageContext = Record<string, unknown> & {
+  Body?: string;
+  BodyForAgent?: string;
+  BodyForCommands?: string;
+  RawBody?: string;
+  CommandBody?: string;
+};
+
+function createCtx(overrides: Partial<TestRuntimeMessageContext> = {}): TestRuntimeMessageContext {
+  return {
+    Body: "LINE body",
+    BodyForAgent: "hello",
+    BodyForCommands: "hello",
+    RawBody: "hello",
+    CommandBody: "hello",
+    From: "line:user:u1",
+    To: "line:user:u1",
+    SessionKey: "agent:sale:line:direct:u1",
+    AgentId: "sale",
+    AccountId: "admin",
+    ChatType: "direct",
+    Provider: "line",
+    Surface: "line",
+    CommandAuthorized: false,
+    CommandTurn: { kind: "none" },
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+  vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+  vi.restoreAllMocks();
+});
+
+describe("applyAgentBrainRuntimeContext", () => {
+  it("stays disabled unless explicitly enabled", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await applyAgentBrainRuntimeContext({
+      ctxPayload: createCtx(),
+      agentId: "sale",
+      channel: "line",
+      accountId: "admin",
+    });
+
+    expect(result).toMatchObject({ attempted: false, applied: false, status: "disabled" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not call Brain for control commands", async () => {
+    process.env.AGENT_BRAIN_ENABLED = "1";
+    process.env.API_TOKEN = "test-token";
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await applyAgentBrainRuntimeContext({
+      ctxPayload: createCtx({
+        BodyForAgent: "/reset",
+        BodyForCommands: "/reset",
+        RawBody: "/reset",
+        CommandBody: "/reset",
+      }),
+      agentId: "sale",
+      channel: "line",
+      accountId: "admin",
+    });
+
+    expect(result).toMatchObject({ attempted: false, applied: false, status: "skipped" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("injects approved Brain context while preserving command text", async () => {
+    process.env.AGENT_BRAIN_ENABLED = "1";
+    process.env.API_TOKEN = "test-token";
+    process.env.AGENT_BRAIN_API_URL = "http://brain.local/api";
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        status: "ok",
+        memoriesToInject: ["- โช๊ค = โช้คอัพ", "- แสดงรหัสสินค้าก่อนชื่อสินค้า"],
+        injectedChars: 48,
+        includedMemoryIds: ["mem_1"],
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = createCtx();
+
+    const result = await applyAgentBrainRuntimeContext({
+      ctxPayload: ctx,
+      agentId: "sale",
+      channel: "line",
+      accountId: "admin",
+    });
+
+    expect(result).toMatchObject({
+      attempted: true,
+      applied: true,
+      status: "ok",
+      injectedChars: 48,
+      includedMemoryIds: ["mem_1"],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://brain.local/api/agent-brain/evaluate-turn",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ Authorization: "Bearer test-token" }),
+      }),
+    );
+    expect(ctx.BodyForAgent).toContain("## Agent Knowledge Brain");
+    expect(ctx.BodyForAgent).toContain("โช๊ค = โช้คอัพ");
+    expect(ctx.BodyForCommands).toBe("hello");
+  });
+});
+
+describe("appendAgentBrainAddendumToPayload", () => {
+  it("appends staff-only description suggestions only to final text replies", () => {
+    const result = {
+      attempted: true,
+      applied: false,
+      status: "ok" as const,
+      assistantAddendum: "คำแนะนำสำหรับ staff: เติมคำว่า โช้คอัพ ใน description",
+    };
+
+    expect(appendAgentBrainAddendumToPayload({ text: "ตอบหลัก" }, result, "tool")).toEqual({
+      text: "ตอบหลัก",
+    });
+    expect(appendAgentBrainAddendumToPayload({ text: "ตอบหลัก" }, result, "final")).toEqual({
+      text: "ตอบหลัก\n\nคำแนะนำสำหรับ staff: เติมคำว่า โช้คอัพ ใน description",
+    });
+    expect(
+      appendAgentBrainAddendumToPayload({ text: "error", isError: true }, result, "final"),
+    ).toEqual({ text: "error", isError: true });
+  });
+});

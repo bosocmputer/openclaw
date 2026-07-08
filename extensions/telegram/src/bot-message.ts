@@ -8,6 +8,7 @@ import {
   shouldLogVerbose,
 } from "openclaw/plugin-sdk/runtime-env";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
+import { applyAgentBrainRuntimeContext } from "../../shared/agent-brain-runtime.js";
 import type { TelegramBotDeps } from "./bot-deps.js";
 import {
   buildTelegramMessageContext,
@@ -199,6 +200,13 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         mediaType: allMedia[0]?.contentType,
       }),
     );
+    const agentBrainResult = await applyAgentBrainRuntimeContext({
+      ctxPayload: context.ctxPayload,
+      agentId: context.route.agentId,
+      channel: "telegram",
+      accountId: context.route.accountId,
+      log: logVerbose,
+    });
     await lifecycle?.onDispatchStart?.();
     const spooledReplay =
       options?.spooledReplay === true || isTelegramSpooledReplayUpdate(primaryCtx.update);
@@ -214,6 +222,7 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         telegramCfg,
         telegramDeps,
         opts,
+        agentBrainResult,
         retryDispatchErrors: spooledReplay,
         suppressFailureFallback: spooledReplay,
       });

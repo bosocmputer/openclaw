@@ -21,6 +21,11 @@ import {
   beginWebhookRequestPipelineOrReject,
   createWebhookInFlightLimiter,
 } from "openclaw/plugin-sdk/webhook-request-guards";
+import {
+  appendAgentBrainAddendumToPayload,
+  applyAgentBrainRuntimeContext,
+  type AgentBrainRuntimeResult,
+} from "../../shared/agent-brain-runtime.js";
 import { resolveDefaultLineAccountId } from "./accounts.js";
 import { deliverLineAutoReply } from "./auto-reply-delivery.js";
 import { createLineBot } from "./bot.js";
@@ -216,6 +221,14 @@ export async function monitorLineProvider(
       try {
         const textLimit = 5000;
         let replyTokenUsed = false;
+        let agentBrainResult: AgentBrainRuntimeResult | null = null;
+        agentBrainResult = await applyAgentBrainRuntimeContext({
+          ctxPayload,
+          agentId: route.agentId,
+          channel: "line",
+          accountId: route.accountId,
+          log: logVerbose,
+        });
         const core = getLineRuntime();
         const turnResult = await core.channel.inbound.run({
           channel: "line",
@@ -240,6 +253,8 @@ export async function monitorLineProvider(
               record: ctx.turn.record,
               replyPipeline: {},
               delivery: {
+                preparePayload: (payload, info) =>
+                  appendAgentBrainAddendumToPayload(payload, agentBrainResult, info.kind),
                 durable: (payload, info) =>
                   resolveLineDurableReplyOptions({
                     payload,
