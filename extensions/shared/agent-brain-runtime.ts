@@ -13,6 +13,7 @@ type RuntimeMessageContext = Record<string, unknown> & {
   BodyForCommands?: string;
   RawBody?: string;
   CommandBody?: string;
+  AgentBrainOriginalUserText?: string;
   MediaPath?: string;
   MediaUrl?: string;
   MediaPaths?: unknown[];
@@ -179,6 +180,14 @@ function buildAgentBrainContextBlock(lines: string[]): string | undefined {
 function appendContextBlock(ctxPayload: RuntimeMessageContext, block: string): void {
   const currentBody = typeof ctxPayload.Body === "string" ? ctxPayload.Body : "";
   const currentAgent = typeof ctxPayload.BodyForAgent === "string" ? ctxPayload.BodyForAgent : "";
+  const originalUserText =
+    normalizeEnvString(ctxPayload.AgentBrainOriginalUserText) ??
+    normalizeEnvString(ctxPayload.BodyForAgent) ??
+    normalizeEnvString(ctxPayload.RawBody) ??
+    normalizeEnvString(ctxPayload.Body);
+  if (originalUserText) {
+    ctxPayload.AgentBrainOriginalUserText = originalUserText;
+  }
   ctxPayload.Body = currentBody ? `${currentBody}\n${block}` : block.trimStart();
   ctxPayload.BodyForAgent = currentAgent ? `${currentAgent}\n${block}` : block.trimStart();
   (ctxPayload as Record<string, unknown>).AgentBrainContextApplied = true;
@@ -238,6 +247,7 @@ export async function applyAgentBrainRuntimeContext(
   }
 
   const userText =
+    normalizeEnvString(params.ctxPayload.AgentBrainOriginalUserText) ??
     normalizeEnvString(params.ctxPayload.BodyForAgent) ??
     normalizeEnvString(params.ctxPayload.RawBody) ??
     normalizeEnvString(params.ctxPayload.Body) ??
@@ -366,6 +376,7 @@ export async function submitAgentBrainTurnEvidence(
     return;
   }
   const userText =
+    normalizeEnvString(params.ctxPayload.AgentBrainOriginalUserText) ??
     normalizeEnvString(params.ctxPayload.BodyForAgent) ??
     normalizeEnvString(params.ctxPayload.RawBody) ??
     normalizeEnvString(params.ctxPayload.Body) ??

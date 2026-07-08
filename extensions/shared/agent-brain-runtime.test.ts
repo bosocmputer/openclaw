@@ -126,6 +126,7 @@ describe("applyAgentBrainRuntimeContext", () => {
     );
     expect(ctx.BodyForAgent).toContain("## Agent Knowledge Brain");
     expect(ctx.BodyForAgent).toContain("โช๊ค = โช้คอัพ");
+    expect(ctx.AgentBrainOriginalUserText).toBe("hello");
     expect(ctx.BodyForCommands).toBe("hello");
   });
 });
@@ -193,5 +194,41 @@ describe("submitAgentBrainTurnEvidence", () => {
     expect(fetchMock.mock.calls[0]?.[1]?.body).toContain(
       '"toolEvidence":["tool search selected A0101 ผ้าเบรค"]',
     );
+  });
+
+  it("posts original user text instead of injected Brain context", async () => {
+    process.env.AGENT_BRAIN_ENABLED = "1";
+    process.env.API_TOKEN = "test-token";
+    process.env.AGENT_BRAIN_API_URL = "http://brain.local";
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, status: "ok" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = {
+      attempted: true,
+      applied: true,
+      status: "ok" as const,
+    };
+    recordAgentBrainFinalPayload(result, { text: "รับทราบครับ" }, "final");
+
+    await submitAgentBrainTurnEvidence({
+      ctxPayload: createCtx({
+        MessageSid: "turn-2",
+        AgentBrainOriginalUserText: "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ",
+        BodyForAgent:
+          "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ\n\n## Agent Knowledge Brain\n- [term] โช๊ค = โช้คอัพ",
+        Body:
+          "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ\n\n## Agent Knowledge Brain\n- [term] โช๊ค = โช้คอัพ",
+      }),
+      agentId: "stock",
+      channel: "telegram",
+      accountId: "stock",
+      result,
+    });
+
+    const body = String(fetchMock.mock.calls[0]?.[1]?.body ?? "");
+    expect(body).toContain('"userText":"จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ"');
+    expect(body).not.toContain("Agent Knowledge Brain");
   });
 });
