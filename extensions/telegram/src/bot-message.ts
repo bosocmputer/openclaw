@@ -205,6 +205,7 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
       agentId: context.route.agentId,
       channel: "telegram",
       accountId: context.route.accountId,
+      sessionKey: context.route.sessionKey,
       log: logVerbose,
     });
     await lifecycle?.onDispatchStart?.();

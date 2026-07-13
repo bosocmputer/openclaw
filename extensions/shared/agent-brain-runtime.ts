@@ -1,5 +1,12 @@
 // Shared Agent Brain runtime helpers for channel integrations.
 
+import { createHmac } from "node:crypto";
+import {
+  beginAgentBrainToolEvidenceCapture,
+  consumeAgentBrainToolEvidence,
+  type AgentBrainToolEvidence,
+} from "../../src/agents/agent-brain-tool-evidence.js";
+
 type ReplyPayloadLike = {
   text?: string;
   isError?: boolean;
@@ -14,10 +21,14 @@ type RuntimeMessageContext = Record<string, unknown> & {
   RawBody?: string;
   CommandBody?: string;
   AgentBrainOriginalUserText?: string;
+  From?: string;
+  SessionKey?: string;
   MediaPath?: string;
   MediaUrl?: string;
   MediaPaths?: unknown[];
   MediaUrls?: unknown[];
+  MediaType?: string;
+  MediaTypes?: unknown[];
   MessageSid?: string;
 };
 
@@ -28,6 +39,10 @@ type AgentBrainEvaluation = {
   injectedChars?: unknown;
   includedMemoryIds?: unknown;
   assistantAddendum?: unknown;
+  lookupId?: unknown;
+  contractVersion?: unknown;
+  generalMemories?: unknown;
+  verifiedSearchHints?: unknown;
 };
 
 export type AgentBrainRuntimeResult = {
@@ -40,6 +55,12 @@ export type AgentBrainRuntimeResult = {
   assistantAddendum?: string;
   finalText?: string;
   toolEvidence?: string[];
+  toolEvents?: AgentBrainToolEvidence[];
+  lookupId?: string;
+  subjectHash?: string;
+  sessionHash?: string;
+  userUtterance?: string;
+  mediaDescriptions?: string[];
 };
 
 export type ApplyAgentBrainRuntimeParams = {
@@ -47,6 +68,7 @@ export type ApplyAgentBrainRuntimeParams = {
   agentId: string;
   channel: "line" | "telegram";
   accountId?: string;
+  sessionKey?: string;
   log?: (message: string) => void;
 };
 
@@ -59,6 +81,12 @@ const DEFAULT_TIMEOUT_MS = 700;
 const MAX_TIMEOUT_MS = 2_500;
 const MAX_CONTEXT_CHARS = 1_500;
 const MAX_ADDENDUM_CHARS = 800;
+const AGENT_BRAIN_CONTRACT_VERSION = 2;
+const CIRCUIT_FAILURE_LIMIT = 5;
+const CIRCUIT_OPEN_MS = 30_000;
+
+let consecutiveFailures = 0;
+let circuitOpenUntil = 0;
 
 function normalizeEnvString(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -73,6 +101,34 @@ function isAgentBrainEnabled(): boolean {
     normalizeEnvString(process.env.AGENT_BRAIN_ENABLED) === "1" ||
     normalizeEnvString(process.env.OPENCLAW_AGENT_BRAIN_ENABLED) === "1"
   );
+}
+
+function envFlag(name: string, fallback = true): boolean {
+  const value = normalizeEnvString(process.env[name])?.toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+  return !["0", "false", "off", "no"].includes(value);
+}
+
+function isAgentBrainV2Enabled(): boolean {
+  return envFlag("AGENT_BRAIN_V2_ENABLED", true);
+}
+
+function circuitIsOpen(): boolean {
+  return Date.now() < circuitOpenUntil;
+}
+
+function recordCircuitSuccess(): void {
+  consecutiveFailures = 0;
+  circuitOpenUntil = 0;
+}
+
+function recordCircuitFailure(): void {
+  consecutiveFailures += 1;
+  if (consecutiveFailures >= CIRCUIT_FAILURE_LIMIT) {
+    circuitOpenUntil = Date.now() + CIRCUIT_OPEN_MS;
+  }
 }
 
 function resolveAgentBrainApiBaseUrl(): string {
@@ -104,7 +160,7 @@ function resolveAgentBrainTimeoutMs(): number {
 }
 
 function withEndpoint(baseUrl: string): string {
-  if (/\/api$/u.test(baseUrl)) {
+  if (baseUrl.endsWith("/api")) {
     return `${baseUrl}/agent-brain/evaluate-turn`;
   }
   return `${baseUrl}/api/agent-brain/evaluate-turn`;
@@ -123,6 +179,61 @@ function countMedia(ctxPayload: RuntimeMessageContext): number {
   const mediaUrls = Array.isArray(ctxPayload.MediaUrls) ? ctxPayload.MediaUrls.length : 0;
   const single = ctxPayload.MediaPath || ctxPayload.MediaUrl ? 1 : 0;
   return Math.max(mediaPaths, mediaUrls, single);
+}
+
+function hmacIdentity(
+  value: string | undefined,
+  token: string,
+  purpose: string,
+): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  const key = normalizeEnvString(process.env.AGENT_BRAIN_SUBJECT_HASH_KEY) ?? token;
+  return createHmac("sha256", key).update(`${purpose}:${normalized}`).digest("hex");
+}
+
+function extractUserUtterance(ctxPayload: RuntimeMessageContext): string {
+  let text =
+    normalizeEnvString(ctxPayload.AgentBrainOriginalUserText) ??
+    normalizeEnvString(ctxPayload.RawBody) ??
+    normalizeEnvString(ctxPayload.CommandBody) ??
+    normalizeEnvString(ctxPayload.BodyForAgent) ??
+    "";
+  const userTextMatch = text.match(
+    /\[(?:Image|Video|Audio|Document)\]\s*\nUser text:\s*\n([\s\S]*?)(?:\nDescription:\s*\n|$)/iu,
+  );
+  if (userTextMatch?.[1]?.trim()) {
+    text = userTextMatch[1];
+  } else {
+    text = text.split(/\n?\[(?:Image|Video|Audio|Document)\]\s*\nDescription:\s*\n/iu)[0];
+  }
+  return text
+    .replace(/^\[(?:LINE|Telegram)[^\]\n]*\]\s*(?:\([^\n]*\):)?\s*/iu, "")
+    .replace(/<media:[^>]+>/giu, " ")
+    .replace(/\[User sent media[^\]]*\]/giu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function extractMediaDescriptions(ctxPayload: RuntimeMessageContext): string[] {
+  const source = [ctxPayload.BodyForAgent, ctxPayload.Body]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  const descriptions: string[] = [];
+  const pattern =
+    /\[(?:Image|Video|Audio|Document)\][\s\S]*?Description:\s*\n([\s\S]*?)(?=\n\[(?:Image|Video|Audio|Document)\]|$)/giu;
+  for (const match of source.matchAll(pattern)) {
+    const description = normalizeSafeLine(match[1], 500);
+    if (description && !descriptions.includes(description)) {
+      descriptions.push(description);
+    }
+    if (descriptions.length >= 5) {
+      break;
+    }
+  }
+  return descriptions;
 }
 
 function normalizeSafeLine(value: unknown, maxChars: number): string | undefined {
@@ -246,12 +357,13 @@ export async function applyAgentBrainRuntimeContext(
     return { attempted: false, applied: false, status: "skipped" };
   }
 
-  const userText =
-    normalizeEnvString(params.ctxPayload.AgentBrainOriginalUserText) ??
-    normalizeEnvString(params.ctxPayload.BodyForAgent) ??
-    normalizeEnvString(params.ctxPayload.RawBody) ??
-    normalizeEnvString(params.ctxPayload.Body) ??
-    "";
+  const sessionKey = params.sessionKey ?? params.ctxPayload.SessionKey;
+  if (circuitIsOpen()) {
+    params.log?.("agent_brain_fail_open status=circuit_open");
+    return { attempted: false, applied: false, status: "skipped" };
+  }
+  const userText = extractUserUtterance(params.ctxPayload);
+  const mediaDescriptions = extractMediaDescriptions(params.ctxPayload);
   const mediaCount = countMedia(params.ctxPayload);
   if (!userText && mediaCount === 0) {
     return { attempted: false, applied: false, status: "skipped" };
@@ -259,31 +371,67 @@ export async function applyAgentBrainRuntimeContext(
 
   const endpoint = withEndpoint(resolveAgentBrainApiBaseUrl());
   const timeoutMs = resolveAgentBrainTimeoutMs();
+  const subjectHash = hmacIdentity(params.ctxPayload.From, token, `${params.channel}:subject`);
+  const sessionHash = hmacIdentity(sessionKey, token, `${params.channel}:session`);
+  if (isAgentBrainV2Enabled()) {
+    beginAgentBrainToolEvidenceCapture({
+      agentId: params.agentId,
+      ...(sessionKey ? { sessionKey } : {}),
+    });
+  }
   const { evaluation, timedOut } = await postAgentBrainEvaluation({
     endpoint,
     token,
     timeoutMs,
     body: {
+      ...(isAgentBrainV2Enabled()
+        ? { contractVersion: AGENT_BRAIN_CONTRACT_VERSION, phase: "pre_turn" }
+        : {}),
       agentId: params.agentId,
       channel: params.channel,
       accountId: params.accountId ?? "default",
       turnId: params.ctxPayload.MessageSid,
       userText,
+      userUtterance: userText,
+      subjectHash,
+      sessionHash,
+      mediaDescriptions,
       hasMedia: mediaCount > 0,
       mediaCount,
     },
   });
   const durationMs = Date.now() - startedAt;
   if (timedOut) {
-    params.log?.(`agent_brain_runtime status=timeout durationMs=${durationMs}`);
-    return { attempted: true, applied: false, status: "timeout", durationMs };
+    recordCircuitFailure();
+    params.log?.(`agent_brain_fail_open status=timeout durationMs=${durationMs}`);
+    return {
+      attempted: true,
+      applied: false,
+      status: "timeout",
+      durationMs,
+      ...(subjectHash ? { subjectHash } : {}),
+      ...(sessionHash ? { sessionHash } : {}),
+      userUtterance: userText,
+      mediaDescriptions,
+    };
   }
   if (!evaluation?.ok) {
+    recordCircuitFailure();
     params.log?.(
-      `agent_brain_runtime status=error reason=${normalizeSafeLine(evaluation?.status, 80) ?? "request_failed"} durationMs=${durationMs}`,
+      `agent_brain_fail_open status=error reason=${normalizeSafeLine(evaluation?.status, 80) ?? "request_failed"} durationMs=${durationMs}`,
     );
-    return { attempted: true, applied: false, status: "error", durationMs };
+    return {
+      attempted: true,
+      applied: false,
+      status: "error",
+      durationMs,
+      ...(subjectHash ? { subjectHash } : {}),
+      ...(sessionHash ? { sessionHash } : {}),
+      userUtterance: userText,
+      mediaDescriptions,
+    };
   }
+  recordCircuitSuccess();
 
   const lines = normalizeMemoryLines(evaluation.memoriesToInject);
   const block = buildAgentBrainContextBlock(lines);
@@ -296,8 +444,9 @@ export async function applyAgentBrainRuntimeContext(
       ? evaluation.injectedChars
       : lines.join("\n").length;
   const includedMemoryIds = normalizeStringArray(evaluation.includedMemoryIds);
+  const lookupId = normalizeSafeLine(evaluation.lookupId, 120);
   params.log?.(
-    `agent_brain_runtime status=ok applied=${Boolean(block)} injectedChars=${injectedChars} durationMs=${durationMs}`,
+    `agent_brain_lookup status=ok applied=${Boolean(block)} injectedChars=${injectedChars} durationMs=${durationMs}`,
   );
   return {
     attempted: true,
@@ -306,6 +455,11 @@ export async function applyAgentBrainRuntimeContext(
     durationMs,
     injectedChars,
     includedMemoryIds,
+    ...(lookupId ? { lookupId } : {}),
+    ...(subjectHash ? { subjectHash } : {}),
+    ...(sessionHash ? { sessionHash } : {}),
+    userUtterance: userText,
+    mediaDescriptions,
     ...(assistantAddendum ? { assistantAddendum } : {}),
   };
 }
@@ -375,40 +529,59 @@ export async function submitAgentBrainTurnEvidence(
   if (!token) {
     return;
   }
-  const userText =
-    normalizeEnvString(params.ctxPayload.AgentBrainOriginalUserText) ??
-    normalizeEnvString(params.ctxPayload.BodyForAgent) ??
-    normalizeEnvString(params.ctxPayload.RawBody) ??
-    normalizeEnvString(params.ctxPayload.Body) ??
-    "";
+  const userText = result.userUtterance ?? extractUserUtterance(params.ctxPayload);
   const finalText = normalizeSafeLine(result.finalText, 1_500) ?? "";
   const mediaCount = countMedia(params.ctxPayload);
   if (!userText && !finalText && mediaCount === 0) {
     return;
   }
-  const { evaluation, timedOut } = await postAgentBrainEvaluation({
+  const sessionKey = params.sessionKey ?? params.ctxPayload.SessionKey;
+  const toolEvents = isAgentBrainV2Enabled()
+    ? consumeAgentBrainToolEvidence({
+        agentId: params.agentId,
+        ...(sessionKey ? { sessionKey } : {}),
+      })
+    : [];
+  result.toolEvents = toolEvents;
+  const request = {
     endpoint: withEndpoint(resolveAgentBrainApiBaseUrl()),
     token,
     timeoutMs: resolveAgentBrainTimeoutMs(),
     body: {
+      ...(isAgentBrainV2Enabled()
+        ? { contractVersion: AGENT_BRAIN_CONTRACT_VERSION, phase: "post_turn" }
+        : {}),
       agentId: params.agentId,
       channel: params.channel,
       accountId: params.accountId ?? "default",
       turnId: params.ctxPayload.MessageSid,
+      lookupId: result.lookupId,
       userText,
+      userUtterance: userText,
+      assistantAnswer: finalText,
       finalText,
+      subjectHash: result.subjectHash,
+      sessionHash: result.sessionHash,
+      mediaDescriptions: result.mediaDescriptions ?? extractMediaDescriptions(params.ctxPayload),
+      toolEvents,
       toolEvidence: Array.isArray(result.toolEvidence) ? result.toolEvidence.slice(0, 5) : [],
       hasMedia: mediaCount > 0,
       mediaCount,
+      lookupDurationMs: result.durationMs,
       evidencePhase: "post_turn",
     },
-  });
+  };
+  let response = await postAgentBrainEvaluation(request);
+  if (!response.evaluation && !response.timedOut) {
+    response = await postAgentBrainEvaluation(request);
+  }
+  const { evaluation, timedOut } = response;
   const durationMs = Date.now() - startedAt;
   if (timedOut) {
-    params.log?.(`agent_brain_post status=timeout durationMs=${durationMs}`);
+    params.log?.(`agent_brain_evidence_submit status=timeout durationMs=${durationMs}`);
     return;
   }
   params.log?.(
-    `agent_brain_post status=${evaluation?.ok ? "ok" : "error"} reason=${normalizeSafeLine(evaluation?.status, 80) ?? "request_failed"} durationMs=${durationMs}`,
+    `agent_brain_evidence_submit status=${evaluation?.ok ? "ok" : "error"} toolEvents=${toolEvents.length} reason=${normalizeSafeLine(evaluation?.status, 80) ?? "request_failed"} durationMs=${durationMs}`,
   );
 }

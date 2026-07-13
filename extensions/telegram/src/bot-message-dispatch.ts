@@ -2907,6 +2907,7 @@ export const dispatchTelegramMessage = async ({
         agentId: route.agentId,
         channel: "telegram",
         accountId: route.accountId,
+        sessionKey: route.sessionKey,
         result: agentBrainResult,
         log: logVerbose,
       });

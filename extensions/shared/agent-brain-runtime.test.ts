@@ -1,6 +1,11 @@
 // Tests for Agent Brain runtime helper safety.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  beginAgentBrainToolEvidenceCapture,
+  clearAgentBrainToolEvidenceForTests,
+  recordAgentBrainToolEvidence,
+} from "../../src/agents/agent-brain-tool-evidence.js";
+import {
   appendAgentBrainAddendumToPayload,
   applyAgentBrainRuntimeContext,
   recordAgentBrainFinalPayload,
@@ -44,6 +49,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearAgentBrainToolEvidenceForTests();
   process.env = { ...ORIGINAL_ENV };
   vi.restoreAllMocks();
 });
@@ -153,6 +159,63 @@ describe("appendAgentBrainAddendumToPayload", () => {
 });
 
 describe("submitAgentBrainTurnEvidence", () => {
+  it("submits bounded structured tool evidence with secrets redacted", async () => {
+    process.env.AGENT_BRAIN_ENABLED = "1";
+    process.env.AGENT_BRAIN_V2_ENABLED = "1";
+    process.env.API_TOKEN = "test-token";
+    process.env.AGENT_BRAIN_API_URL = "http://brain.local";
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, status: "ok" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    beginAgentBrainToolEvidenceCapture({ agentId: "sale", sessionKey: "session-1" });
+    for (let index = 0; index < 25; index += 1) {
+      recordAgentBrainToolEvidence({
+        agentId: "sale",
+        sessionKey: "session-1",
+        event: {
+          toolCallId: `call-${index}`,
+          toolName: "sale__search_product",
+          status: "ok",
+          input: { keyword: "widget", authorization: "Bearer secret" },
+          result: {
+            schema_version: "search_product.v2",
+            status: "resolved",
+            selected: { code: "SKU-001" },
+            apiKey: "secret",
+          },
+        },
+      });
+    }
+    const result = {
+      attempted: true,
+      applied: false,
+      status: "ok" as const,
+      lookupId: "lookup-1",
+      userUtterance: "widget",
+    };
+
+    await submitAgentBrainTurnEvidence({
+      ctxPayload: createCtx({ MessageSid: "turn-structured" }),
+      agentId: "sale",
+      channel: "line",
+      accountId: "admin",
+      sessionKey: "session-1",
+      result,
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}")) as {
+      toolEvents?: Array<Record<string, unknown>>;
+    };
+    expect(body.toolEvents).toHaveLength(20);
+    expect(body.toolEvents?.[0]).toMatchObject({
+      toolName: "sale__search_product",
+      input: { keyword: "widget", authorization: "[redacted]" },
+      result: { apiKey: "[redacted]" },
+    });
+  });
+
   it("posts final answer evidence after a turn without changing the reply payload", async () => {
     process.env.AGENT_BRAIN_ENABLED = "1";
     process.env.API_TOKEN = "test-token";
@@ -216,10 +279,8 @@ describe("submitAgentBrainTurnEvidence", () => {
       ctxPayload: createCtx({
         MessageSid: "turn-2",
         AgentBrainOriginalUserText: "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ",
-        BodyForAgent:
-          "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ\n\n## Agent Knowledge Brain\n- [term] โช๊ค = โช้คอัพ",
-        Body:
-          "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ\n\n## Agent Knowledge Brain\n- [term] โช๊ค = โช้คอัพ",
+        BodyForAgent: "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ\n\n## Agent Knowledge Brain\n- [term] โช๊ค = โช้คอัพ",
+        Body: "จำไว้ว่า ลูกปืนดุม แทน ดุมล้อ\n\n## Agent Knowledge Brain\n- [term] โช๊ค = โช้คอัพ",
       }),
       agentId: "stock",
       channel: "telegram",

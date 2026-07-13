@@ -39,6 +39,7 @@ import type { PluginHookAfterToolCallEvent } from "../plugins/types.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { truncateUtf16Safe } from "../utils.js";
 import { normalizeAcceptedSessionSpawnResult } from "./accepted-session-spawn.js";
+import { recordAgentBrainToolEvidence } from "./agent-brain-tool-evidence.js";
 import {
   consumeAdjustedParamsForToolCall,
   consumePreExecutionBlockedToolCall,
@@ -1612,10 +1613,23 @@ export async function handleToolExecutionEnd(
     ctx.log.debug(`embedded run tool stream boundary callback failed: ${String(error)}`);
   });
 
+  const durationMs = startData?.startTime != null ? Date.now() - startData.startTime : undefined;
+  recordAgentBrainToolEvidence({
+    agentId: ctx.params.agentId,
+    sessionKey: ctx.params.sessionKey,
+    event: {
+      toolName,
+      toolCallId,
+      status: isToolError ? "error" : "ok",
+      durationMs,
+      input: startArgs,
+      result: sanitizedResult,
+    },
+  });
+
   // Run after_tool_call plugin hook (fire-and-forget)
   const hookRunnerAfter = ctx.hookRunner ?? (await loadHookRunnerGlobal()).getGlobalHookRunner();
   if (hookRunnerAfter?.hasHooks("after_tool_call")) {
-    const durationMs = startData?.startTime != null ? Date.now() - startData.startTime : undefined;
     const hookEvent: PluginHookAfterToolCallEvent = {
       toolName,
       params: startArgs,

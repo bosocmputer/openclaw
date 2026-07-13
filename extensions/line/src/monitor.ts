@@ -229,6 +229,7 @@ export async function monitorLineProvider(
           agentId: route.agentId,
           channel: "line",
           accountId: route.accountId,
+          sessionKey: route.sessionKey,
           log: logVerbose,
         });
         const core = getLineRuntime();
@@ -333,6 +334,7 @@ export async function monitorLineProvider(
           agentId: route.agentId,
           channel: "line",
           accountId: route.accountId,
+          sessionKey: route.sessionKey,
           result: agentBrainResult,
           log: logVerbose,
         });
