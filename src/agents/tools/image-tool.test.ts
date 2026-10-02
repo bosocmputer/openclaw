@@ -1859,6 +1859,47 @@ describe("image tool implicit imageModel config", () => {
     });
   });
 
+  it("ignores a per-call model override when an image model is configured", async () => {
+    await withTempAgentDir(async (agentDir) => {
+      const describeImage = vi.fn(async (params: ImageDescriptionRequest) => ({
+        text: "ok",
+        model: params.model,
+      }));
+      installFastLocalImageProviderStubs({
+        id: "openrouter",
+        capabilities: ["image"],
+        describeImage,
+      });
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            imageModel: { primary: "openrouter/google/gemini-3.8-flash" },
+          },
+        },
+        models: {
+          providers: {
+            openrouter: {
+              baseUrl: "https://openrouter.ai/api/v1",
+              models: [makeModelDefinition("google/gemini-3.8-flash", ["text", "image"])],
+            },
+          },
+        },
+      };
+
+      const tool = requireImageTool(createImageTool({ config: cfg, agentDir }));
+      await tool.execute("t1", {
+        prompt: "Describe this image.",
+        image: `data:image/png;base64,${ONE_PIXEL_PNG_B64}`,
+        model: "openrouter/google/gemini-2.5-flash",
+      });
+
+      expect(firstImageRequest(describeImage)).toMatchObject({
+        provider: "openrouter",
+        model: "google/gemini-3.8-flash",
+      });
+    });
+  });
+
   it("rejects ambiguous providerless explicit image models", async () => {
     await withTempAgentDir(async (agentDir) => {
       const cfg: OpenClawConfig = {
@@ -2130,7 +2171,6 @@ describe("image tool implicit imageModel config", () => {
             type: "array",
             items: { type: "string" },
           },
-          model: { type: "string" },
           maxBytesMb: { type: "number", exclusiveMinimum: 0 },
           maxImages: { type: "integer", minimum: 1 },
         },

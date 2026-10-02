@@ -865,7 +865,9 @@ export function createImageTool(options?: {
           description: "Image paths/URLs; maxImages default 20.",
         }),
       ),
-      model: Type.Optional(Type.String()),
+      // An explicit image model is the operator-controlled execution boundary.
+      // Do not expose a competing model field that an agent could use to bypass it.
+      ...(explicitImageModelConfig ? {} : { model: Type.Optional(Type.String()) }),
       maxBytesMb: optionalFiniteNumberSchema({ exclusiveMinimum: 0 }),
       maxImages: optionalPositiveIntegerSchema(),
     }),
@@ -912,10 +914,9 @@ export function createImageTool(options?: {
         };
       }
 
-      const { prompt: promptRaw, modelOverride } = resolvePromptAndModelOverride(
-        record,
-        DEFAULT_PROMPT,
-      );
+      const { prompt: promptRaw, modelOverride: requestedModelOverride } =
+        resolvePromptAndModelOverride(record, DEFAULT_PROMPT);
+      const modelOverride = explicitImageModelConfig ? undefined : requestedModelOverride;
       const maxBytesMb = readFiniteNumberParam(record, "maxBytesMb", {
         min: 0,
         minExclusive: true,
