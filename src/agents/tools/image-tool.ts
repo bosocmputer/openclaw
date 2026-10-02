@@ -7,6 +7,7 @@ import { resolve, isAbsolute } from "node:path";
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { MediaUnderstandingModelConfig } from "../../config/types.tools.js";
+import type { Usage } from "../../llm/types.js";
 import {
   DEFAULT_TIMEOUT_SECONDS,
   resolveAutoMediaKeyProviders,
@@ -218,6 +219,36 @@ function resolveImageToolMaxTokens(modelMaxTokens: number | undefined, requested
     return requestedMaxTokens;
   }
   return Math.min(requestedMaxTokens, modelMaxTokens);
+}
+
+function sumImageUsage(usages: readonly Usage[]): Usage | undefined {
+  if (usages.length === 0) {
+    return undefined;
+  }
+  return usages.reduce<Usage>(
+    (total, usage) => ({
+      input: total.input + usage.input,
+      output: total.output + usage.output,
+      cacheRead: total.cacheRead + usage.cacheRead,
+      cacheWrite: total.cacheWrite + usage.cacheWrite,
+      totalTokens: total.totalTokens + usage.totalTokens,
+      cost: {
+        input: total.cost.input + usage.cost.input,
+        output: total.cost.output + usage.cost.output,
+        cacheRead: total.cost.cacheRead + usage.cost.cacheRead,
+        cacheWrite: total.cost.cacheWrite + usage.cost.cacheWrite,
+        total: total.cost.total + usage.cost.total,
+      },
+    }),
+    {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  );
 }
 
 /**
@@ -646,6 +677,7 @@ async function runImagePrompt(params: {
   text: string;
   provider: string;
   model: string;
+  usage?: Usage;
   attempts: Array<{ provider: string; model: string; error: string }>;
 }> {
   const effectiveCfg = applyImageModelConfigDefaults(params.cfg, params.imageModelConfig);
@@ -688,7 +720,12 @@ async function runImagePrompt(params: {
           authStore: params.authStore,
           ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
         });
-        return { text: described.text, provider, model: described.model ?? modelId };
+        return {
+          text: described.text,
+          provider,
+          model: described.model ?? modelId,
+          ...(described.usage ? { usage: described.usage } : {}),
+        };
       }
       const describeImage =
         imageProvider?.describeImage ?? imageToolProviderDeps.describeImageWithModel;
@@ -708,10 +745,16 @@ async function runImagePrompt(params: {
           authStore: params.authStore,
           ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
         });
-        return { text: described.text, provider, model: described.model ?? modelId };
+        return {
+          text: described.text,
+          provider,
+          model: described.model ?? modelId,
+          ...(described.usage ? { usage: described.usage } : {}),
+        };
       }
 
       const parts: string[] = [];
+      const usages: Usage[] = [];
       for (const [index, image] of params.images.entries()) {
         const described = await describeImage({
           buffer: image.buffer,
@@ -728,11 +771,16 @@ async function runImagePrompt(params: {
           ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
         });
         parts.push(`Image ${index + 1}:\n${described.text.trim()}`);
+        if (described.usage) {
+          usages.push(described.usage);
+        }
       }
+      const usage = sumImageUsage(usages);
       return {
         text: parts.join("\n\n").trim(),
         provider,
         model: modelId,
+        ...(usage ? { usage } : {}),
       };
     },
   });
@@ -741,6 +789,7 @@ async function runImagePrompt(params: {
     text: result.result.text,
     provider: result.result.provider,
     model: result.result.model,
+    ...(result.result.usage ? { usage: result.result.usage } : {}),
     attempts: result.attempts.map((attempt) => ({
       provider: attempt.provider,
       model: attempt.model,

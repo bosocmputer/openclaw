@@ -57,6 +57,7 @@ type TextToolResult = {
   text: string;
   provider: string;
   model: string;
+  usage?: unknown;
   attempts: TextToolAttempt[];
 };
 
@@ -628,6 +629,7 @@ export function buildTextToolResult(
     details: {
       model: `${result.provider}/${result.model}`,
       ...extraDetails,
+      ...(result.usage !== undefined ? { usage: result.usage } : {}),
       attempts: result.attempts,
     },
   };

@@ -624,8 +624,17 @@ describe("describeImageWithModel", () => {
         api: "ollama",
         provider: "ollama",
         model: "llava:latest",
+        responseModel: "llava:vision-routed",
         stopReason: "stop",
         timestamp: Date.now(),
+        usage: {
+          input: 320,
+          output: 12,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 332,
+          cost: { input: 0.00024, output: 0.000045, cacheRead: 0, cacheWrite: 0, total: 0.000285 },
+        },
         content: [{ type: "text", text: "plugin vision ok" }],
       })),
     };
@@ -646,7 +655,15 @@ describe("describeImageWithModel", () => {
 
     expect(result).toEqual({
       text: "plugin vision ok",
-      model: "llava:latest",
+      model: "llava:vision-routed",
+      usage: {
+        input: 320,
+        output: 12,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 332,
+        cost: { input: 0.00024, output: 0.000045, cacheRead: 0, cacheWrite: 0, total: 0.000285 },
+      },
     });
     expect(registerProviderStreamForModelMock).toHaveBeenCalledWith({
       model: {

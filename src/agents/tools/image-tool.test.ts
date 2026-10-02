@@ -1806,6 +1806,59 @@ describe("image tool implicit imageModel config", () => {
     });
   });
 
+  it("uses the configured image model and preserves its runtime usage in tool details", async () => {
+    await withTempAgentDir(async (agentDir) => {
+      const usage = {
+        input: 320,
+        output: 12,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 332,
+        cost: { input: 0.00024, output: 0.000045, cacheRead: 0, cacheWrite: 0, total: 0.000285 },
+      };
+      const describeImage = vi.fn(
+        async (params: ImageDescriptionRequest) =>
+          ({ text: "ok", model: params.model, usage }) as never,
+      );
+      installFastLocalImageProviderStubs({
+        id: "openrouter",
+        capabilities: ["image"],
+        describeImage,
+      });
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            model: { primary: "openrouter/stealth/space-bunny-alpha" },
+            imageModel: { primary: "openrouter/google/gemini-3.8-flash" },
+          },
+        },
+        models: {
+          providers: {
+            openrouter: {
+              baseUrl: "https://openrouter.ai/api/v1",
+              models: [makeModelDefinition("google/gemini-3.8-flash", ["text", "image"])],
+            },
+          },
+        },
+      };
+
+      const tool = requireImageTool(createImageTool({ config: cfg, agentDir }));
+      const result = await tool.execute("t1", {
+        prompt: "Describe this image.",
+        image: `data:image/png;base64,${ONE_PIXEL_PNG_B64}`,
+      });
+
+      expect(firstImageRequest(describeImage)).toMatchObject({
+        provider: "openrouter",
+        model: "google/gemini-3.8-flash",
+      });
+      expect(result.details).toMatchObject({
+        model: "openrouter/google/gemini-3.8-flash",
+        usage,
+      });
+    });
+  });
+
   it("rejects ambiguous providerless explicit image models", async () => {
     await withTempAgentDir(async (agentDir) => {
       const cfg: OpenClawConfig = {

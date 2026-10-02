@@ -3,6 +3,7 @@
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import type { ModelProviderConfig } from "../config/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { Usage } from "../llm/types.js";
 
 type MediaUnderstandingKind = "audio.transcription" | "video.description" | "image.description";
 
@@ -175,11 +176,15 @@ export type ImagesDescriptionRequest = {
 export type ImageDescriptionResult = {
   text: string;
   model?: string;
+  /** Provider-normalized usage for the image request when available. */
+  usage?: Usage;
 };
 
 export type ImagesDescriptionResult = {
   text: string;
   model?: string;
+  /** Provider-normalized usage for the image request when available. */
+  usage?: Usage;
 };
 
 export type StructuredExtractionTextInput = {

@@ -19,7 +19,13 @@ import {
 } from "../agents/tools/image-tool.helpers.js";
 import { isSecretRef } from "../config/types.secrets.js";
 import { complete } from "../llm/stream.js";
-import type { AssistantMessage, Context, Model, ProviderStreamOptions } from "../llm/types.js";
+import type {
+  AssistantMessage,
+  Context,
+  Model,
+  ProviderStreamOptions,
+  Usage,
+} from "../llm/types.js";
 import {
   buildCopilotIdeHeaders,
   COPILOT_INTEGRATION_ID,
@@ -583,7 +589,7 @@ async function describeImagesWithModelInternal(
       provider: model.provider,
       model: model.id,
     });
-    return { text, model: model.id };
+    return { text, model: message.responseModel ?? model.id, usage: message.usage };
   } catch (err) {
     if (!isImageModelNoTextError(err) || !hasImageReasoningOnlyResponse(message)) {
       throw err;
@@ -596,7 +602,7 @@ async function describeImagesWithModelInternal(
     provider: model.provider,
     model: model.id,
   });
-  return { text, model: model.id };
+  return { text, model: retryMessage.responseModel ?? model.id, usage: retryMessage.usage };
 }
 
 function toImagesDescriptionRequest(params: ImageDescriptionRequest): ImagesDescriptionRequest {
